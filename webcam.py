@@ -1,5 +1,6 @@
 #Copyright (c) 2018-2019 Jeremy Lainé.
 #All rights reserved.
+# sy-eng modified webcam.py on https://github.com/aiortc/aiortc for my application.
 #
 #Redistribution and use in source and binary forms, with or without
 #modification, are permitted provided that the following conditions are met:
@@ -24,8 +25,6 @@
 #OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 #OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-# sy-eng modified webcam.py on https://github.com/aiortc/aiortc for my application.
-
 import argparse
 import asyncio
 import json
@@ -33,30 +32,41 @@ import logging
 import os
 import platform
 import ssl
+
+#These 4 librarries are added
 import serial
 import sys
 import time
+import requests
 
 from aiohttp import web
 
 from aiortc import RTCPeerConnection, RTCSessionDescription
-from aiortc.contrib.media import MediaPlayer
+from aiortc.contrib.media import MediaPlayer, MediaRelay
 
 ROOT = os.path.dirname(__file__)
+relay = None
+webcam = None
+
+#These flag is added
 busyFlag = False
 
-def sendData(data):
-	ser = serial.Serial('/dev/ttyUSB0', 9600, timeout=0.5)
-	time.sleep(5)
+async def sendData(data):
+	ser = serial.Serial('/dev/serial/by-path/pci-0000:02:00.0-usb-0:5.1.1:1.0-port0', 9600, timeout=0.5)
+	await asyncio.sleep(3)
 	ser.write(data)
 	ser.flush()
-	time.sleep(1)
-	ser.write(data)
-	ser.flush()
-	time.sleep(1)
 	ser.write(data)
 	ser.flush()
 	ser.close()
+
+async def lightOn(request):
+	await sendData(b'n')
+	return web.Response(content_type="text/html", text="OK")
+
+async def lightOff(request):
+	await sendData(b'f')
+	return web.Response(content_type="text/html", text="OK")
 
 def setBusyFlag(flag):
 	global busyFlag
@@ -66,13 +76,40 @@ def getBusyFlag():
 	global busyFlag
 	return busyFlag
 
-async def lightOn(request):
-	sendData(b'n')
-	return web.Response(content_type="text/html", text="OK")
+def create_local_tracks(play_from):
+    global relay, webcam
 
-async def lightOff(request):
-	sendData(b'f')
-	return web.Response(content_type="text/html", text="OK")
+    if play_from:
+        player = MediaPlayer(play_from)
+        return player.audio, player.video
+    else:
+        options = {"framerate": "30", "video_size": "640x480"}
+        if relay is None:
+            if platform.system() == "Darwin":
+                webcam = MediaPlayer(
+                    "default:none", format="avfoundation", options=options
+                )
+            elif platform.system() == "Windows":
+                webcam = MediaPlayer(
+                    "video=Integrated Camera", format="dshow", options=options
+                )
+            else:
+                webcam = MediaPlayer("/dev/video2", format="v4l2", options=options)
+            relay = MediaRelay()
+        return None, relay.subscribe(webcam.video)
+
+async def getCommand(request):
+#	print(request)
+#	print(vars(request))
+	#"await" is necessary or data will be void
+	data = await request.post()
+	#print("http://192.168.7.2:8080?command=" + data['command'])
+	loop = asyncio.get_event_loop()
+	url = "http://192.168.7.2:8080?command=" + data['command']
+#	res = requests.get("http://192.168.7.2:8080?command=" + data['command'])
+	res = await loop.run_in_executor(None, requests.get, url)
+	
+	return web.Response(content_type="text/html", text=res.text)
 
 async def index(request):
 	if not getBusyFlag():
@@ -93,38 +130,37 @@ async def javascriptLight(request):
     content = open(os.path.join(ROOT, "light.js"), "r").read()
     return web.Response(content_type="application/javascript", text=content)
 
+async def javascriptCommand(request):
+    content = open(os.path.join(ROOT, "command.js"), "r").read()
+    return web.Response(content_type="application/javascript", text=content)
+
 async def offer(request):
+    print(request)
+#    print(vars(request))
+    print(request._transport_peername[0])
+    print(request.remote)
     params = await request.json()
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
     pc = RTCPeerConnection()
     pcs.add(pc)
     
-#    print("a")
-
     @pc.on("iceconnectionstatechange")
-    async def on_iceconnectionstatechange():
-        print("ICE connection state is %s" % pc.iceConnectionState)
-        if pc.iceConnectionState == "failed":
+    async def on_connectionstatechange():
+        print("Connection state is %s" % pc.connectionState)
+        if pc.connectionState == "failed":
             await pc.close()
             pcs.discard(pc)
 
     # open media source
-    if args.play_from:
-        player = MediaPlayer(args.play_from)
-    else:
-        options = {"framerate": "30", "video_size": "640x480"}
-        if platform.system() == "Darwin":
-            player = MediaPlayer("default:none", format="avfoundation", options=options)
-        else:
-            player = MediaPlayer("/dev/video0", format="v4l2", options=options)
+    audio, video = create_local_tracks(args.play_from)
 
     await pc.setRemoteDescription(offer)
     for t in pc.getTransceivers():
-        if t.kind == "audio" and player.audio:
-            pc.addTrack(player.audio)
-        elif t.kind == "video" and player.video:
-            pc.addTrack(player.video)
+        if t.kind == "audio" and audio:
+            pc.addTrack(audio)
+        elif t.kind == "video" and video:
+            pc.addTrack(video)
 
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
@@ -147,11 +183,6 @@ async def on_shutdown(app):
     setBusyFlag(False)
     print("The resource is released")
 
-async def shutDown(app):
-	print("shutdown")
-	await on_shutdown(app)
-	return web.Response(content_type="text/html", text="<html><body><h2>This page has been shut down</h2></body></html>")	
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="WebRTC webcam demo")
     parser.add_argument("--cert-file", help="SSL certificate file (for HTTPS)")
@@ -168,6 +199,8 @@ if __name__ == "__main__":
 
     if args.verbose:
         logging.basicConfig(level=logging.DEBUG)
+    else:
+        logging.basicConfig(level=logging.INFO)
 
     if args.cert_file:
         ssl_context = ssl.SSLContext()
@@ -180,9 +213,9 @@ if __name__ == "__main__":
     app.router.add_get("/", index)
     app.router.add_get("/lightOn.html", lightOn)
     app.router.add_get("/lightOff.html", lightOff)
-    app.router.add_get("/shutdown.html", shutDown)
     app.router.add_get("/client.js", javascript)
     app.router.add_get("/light.js", javascriptLight)
+    app.router.add_post("/getCommand.html", getCommand)
     app.router.add_post("/offer", offer)
     web.run_app(app, host=args.host, port=args.port, ssl_context=ssl_context)
     
