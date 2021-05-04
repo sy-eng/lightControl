@@ -1,3 +1,4 @@
+#This program run on linux
 import cv2
 from myV4L2Lib import *
 import sys
