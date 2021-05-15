@@ -1,4 +1,4 @@
-#Copyright (c) 2018-2019 Jeremy Lainé.
+#Copyright (c) 2018-2019 Jeremy Laine.
 #All rights reserved.
 # sy-eng modified webcam.py on https://github.com/aiortc/aiortc for my application.
 #
@@ -33,23 +33,38 @@ import os
 import platform
 import ssl
 
-#These 4 librarries are added
+#These 6 librarries are added
 import serial
 import sys
 import time
 import requests
+import subprocess
+import signal
 
 from aiohttp import web
 
 from aiortc import RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaPlayer, MediaRelay
 
-ROOT = os.path.dirname(__file__)
+DIRECTORY = "./"
+TIME_TO_EXPIRE = 120
+ROOT = os.path.dirname(__file__) + DIRECTORY
+
 relay = None
+relayFilter = None
 webcam = None
+webcamFilter = None
+userList = []
+
+pcs = set()
+
+#command1 = ["python", DIRECTORY + "loopbackForSubprocess.py", "0", "6", "0"]
+#proc1 = subprocess.Popen(command1)
+command2 = ["python", DIRECTORY + "loopbackForSubprocess.py", "2", "7", "0"]
+proc2 = subprocess.Popen(command2)
 
 #These flag is added
-busyFlag = False
+MAX_CONNECTION_NUM = 2
 
 async def sendData(data):
 	ser = serial.Serial('/dev/serial/by-path/pci-0000:02:00.0-usb-0:5.1.1:1.0-port0', 9600, timeout=0.5)
@@ -68,59 +83,97 @@ async def lightOff(request):
 	await sendData(b'f')
 	return web.Response(content_type="text/html", text="OK")
 
-def setBusyFlag(flag):
-	global busyFlag
-#	busyFlag = flag
+def zoomIn(request):
+#	print("zoomIn")
+	proc2.send_signal(signal.SIGUSR1)
+	return web.Response(content_type="text/html", text="OK")
 
-def getBusyFlag():
-	global busyFlag
-	return busyFlag
+def zoomOut(request):
+#	print("zoomOut")
+	proc2.send_signal(signal.SIGUSR2)
+	return web.Response(content_type="text/html", text="OK")
 
-def create_local_tracks(play_from):
+def create_local_tracks(play_from, owner = False, camFilter = False):
     global relay, webcam
+    global relayFilter, webcamFilter
 
     if play_from:
         player = MediaPlayer(play_from)
         return player.audio, player.video
     else:
-        options = {"framerate": "30", "video_size": "640x480"}
-        if relay is None:
-            if platform.system() == "Darwin":
-                webcam = MediaPlayer(
-                    "default:none", format="avfoundation", options=options
-                )
-            elif platform.system() == "Windows":
-                webcam = MediaPlayer(
-                    "video=Integrated Camera", format="dshow", options=options
-                )
-            else:
-                webcam = MediaPlayer("/dev/video2", format="v4l2", options=options)
-            relay = MediaRelay()
-        return None, relay.subscribe(webcam.video)
+#        options = {"framerate": "30", "video_size": "640x480"}
+        if not owner:
+            if relay is None:
+                webcam = MediaPlayer("/dev/video0", format="v4l2")
+#                webcam = MediaPlayer("/dev/video0", format="v4l2", options=options)
+#                webcam = MediaPlayer("/dev/video6", format="v4l2", options=options)
+                relay = MediaRelay()
+            relayTmp = relay.subscribe(webcam.video)
+        else:
+            if relayFilter is None:
+                webcamFilter = MediaPlayer("/dev/video7", format="v4l2")
+#                webcamFilter = MediaPlayer("/dev/video7", format="v4l2", options=options)
+                relayFilter = MediaRelay()
+            relayTmp = relayFilter.subscribe(webcamFilter.video)
+
+        if camFilter:
+            proc2.send_signal(40)
+        else:
+            proc2.send_signal(41)
+        
+        return None, relayTmp
 
 async def getCommand(request):
 #	print(request)
-#	print(vars(request))
 	#"await" is necessary or data will be void
 	data = await request.post()
-	#print("http://192.168.7.2:8080?command=" + data['command'])
 	loop = asyncio.get_event_loop()
+#	print(data)
+#	print("http://192.168.7.2:8080?command=" + data['command'])
 	url = "http://192.168.7.2:8080?command=" + data['command']
 #	res = requests.get("http://192.168.7.2:8080?command=" + data['command'])
 	res = await loop.run_in_executor(None, requests.get, url)
 	
 	return web.Response(content_type="text/html", text=res.text)
 
+def getIdNum():
+	retVal = 0
+	
+	if len(userList):
+		while retVal in [r[1] for r in userList]:
+			retVal += 1
+		
+	return retVal
+
+def deleteOldUsers():
+	timeNow = time.time()
+	
+	for usr in userList:
+		#delete if the user does not have a video stream
+		if (usr[2] == None) and (timeNow - usr[3] > TIME_TO_EXPIRE):
+			userList.remove(usr)
+
 async def index(request):
-	if not getBusyFlag():
-		setBusyFlag(True)
-		content = open(os.path.join(ROOT, "light.html"), "r").read()
-		print("This request is approved")
-		return web.Response(content_type="text/html", text=content)
+	global controlOwner
+	global userList
+	
+	deleteOldUsers()
+#	print(vars(request))
+	idNum = getIdNum()
+	print("idNum : %d" % idNum)
+	if idNum == 0:
+		userList.append([request.remote, idNum, None, time.time(), False])
+		controlOwner = request.remote
+		print("controlOwner : %s" % controlOwner)
+		content = open(os.path.join(ROOT, "lightHeadHtml.txt"), "r").read() + "\t<script>const id = " + str(idNum) + open(os.path.join(ROOT, "lightOwnerHtml.txt"), "r").read()
+		print("This request is approved(Owner)")
 	else:
-		content = open(os.path.join(ROOT, "lightBusy.html"), "r").read()
-		print("Reject a request")
-		return web.Response(content_type="text/html", text=content)
+		userList.append([request.remote, idNum, None, time.time(), False])
+		content = open(os.path.join(ROOT, "lightHeadHtml.txt"), "r").read() + "\t<script>const id = " + str(idNum) + open(os.path.join(ROOT, "lightHtml.txt"), "r").read()
+		print("This request is approved")
+	print(userList)
+		
+	return web.Response(content_type="text/html", text=content)
     
 async def javascript(request):
     content = open(os.path.join(ROOT, "client.js"), "r").read()
@@ -130,58 +183,99 @@ async def javascriptLight(request):
     content = open(os.path.join(ROOT, "light.js"), "r").read()
     return web.Response(content_type="application/javascript", text=content)
 
+async def lightBusy(request):
+    content = open(os.path.join(ROOT, "lightBusy.html"), "r").read()
+    return web.Response(content_type="text/html", text=content)
+
 async def javascriptCommand(request):
     content = open(os.path.join(ROOT, "command.js"), "r").read()
     return web.Response(content_type="application/javascript", text=content)
 
-async def offer(request):
-    print(request)
-#    print(vars(request))
-    print(request._transport_peername[0])
-    print(request.remote)
-    params = await request.json()
-    offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
-
-    pc = RTCPeerConnection()
-    pcs.add(pc)
+def getIndexFromId(idNum):
+    retIndex = -1
     
-    @pc.on("iceconnectionstatechange")
-    async def on_connectionstatechange():
-        print("Connection state is %s" % pc.connectionState)
-        if pc.connectionState == "failed":
-            await pc.close()
-            pcs.discard(pc)
+    if len(userList) > 0:
+        idList = [r[1] for r in userList]
+        if idNum in idList:
+            retIndex = idList.index(idNum)
+            
+    return retIndex
 
-    # open media source
-    audio, video = create_local_tracks(args.play_from)
+def deleteAnObj(pc):
+	index = [r[2] for r in userList].index(pc)
+	del userList[index]
 
-    await pc.setRemoteDescription(offer)
-    for t in pc.getTransceivers():
-        if t.kind == "audio" and audio:
-            pc.addTrack(audio)
-        elif t.kind == "video" and video:
-            pc.addTrack(video)
+async def offer(request):
+    if len(pcs) < MAX_CONNECTION_NUM:
+        params = await request.json()
+        offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+        idNum = params["idNum"]
+#        print("idNum(offer) : %d" % idNum)
+    
+#        print("offer func")
+#        print("path : %s" % request.rel_url.path)
+#        print(request.rel_url.path == "/offerFilter")
+        camFilter = (request.rel_url.path == "/offerFilter")
 
-    answer = await pc.createAnswer()
-    await pc.setLocalDescription(answer)
+        indexNum = getIndexFromId(idNum)
+        if indexNum >= 0:
+            if userList[indexNum][0] == request.remote:
+                pc = RTCPeerConnection()
+                pcs.add(pc)
+                userList[indexNum][2] = pc
+                userList[indexNum][4] = camFilter
+#                print(pc)
+#                print(vars(request))
+    
+                @pc.on("iceconnectionstatechange")
+                async def on_connectionstatechange():
+                    print("Connection state is %s" % pc.connectionState)
+                    if pc.connectionState == "failed":
+                        deleteAnObj(pc)
+                        await pc.close()
+                        pcs.discard(pc)
 
-    return web.Response(
-        content_type="application/json",
-        text=json.dumps(
-            {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
-        ),
-    )
+                owner = False
+                if userList[indexNum][1] == 0:
+                    owner = True
 
+                # open media source
+                audio, video = create_local_tracks(args.play_from, owner = owner, camFilter = camFilter)
 
-pcs = set()
+                await pc.setRemoteDescription(offer)
+                for t in pc.getTransceivers():
+                    if t.kind == "audio" and audio:
+                        pc.addTrack(audio)
+                    elif t.kind == "video" and video:
+                        pc.addTrack(video)
 
+                answer = await pc.createAnswer()
+                await pc.setLocalDescription(answer)
+
+                return web.Response(
+                    content_type="application/json",
+                    text=json.dumps(
+                        {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+                          ),
+                    )
+            else:
+                print("request remote : %s" % request.remote)
+                return web.Response(content_type="text/html", text="busy")
+        else:
+            print("indexNum error : %d" % indexNum)
+            return web.Response(content_type="text/html", text="busy")
+    else:
+        return web.Response(content_type="text/html", text="busy")
+
+# This application is shutdown with this function(destructor)
 async def on_shutdown(app):
     # close peer connections
     coros = [pc.close() for pc in pcs]
     await asyncio.gather(*coros)
     pcs.clear()
-    setBusyFlag(False)
     print("The resource is released")
+    #proc.send_signal(signal.SIGINT)
+    #print("Virtual camera is closed")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="WebRTC webcam demo")
@@ -211,11 +305,15 @@ if __name__ == "__main__":
     app = web.Application()
     app.on_shutdown.append(on_shutdown)
     app.router.add_get("/", index)
+    app.router.add_get("/zoomIn.html", zoomIn)
+    app.router.add_get("/zoomOut.html", zoomOut)
     app.router.add_get("/lightOn.html", lightOn)
     app.router.add_get("/lightOff.html", lightOff)
     app.router.add_get("/client.js", javascript)
     app.router.add_get("/light.js", javascriptLight)
+    app.router.add_get("/lightBusy.html", lightBusy)
     app.router.add_post("/getCommand.html", getCommand)
     app.router.add_post("/offer", offer)
+    app.router.add_post("/offerFilter", offer)
     web.run_app(app, host=args.host, port=args.port, ssl_context=ssl_context)
     

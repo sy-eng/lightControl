@@ -27,9 +27,6 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 © 2020 GitHub, Inc.
 */
-/*
-sy-eng modified webcam.py on https://github.com/aiortc/aiortc for my application.
-*/
 
 var pc = null;
 
@@ -55,22 +52,45 @@ function negotiate() {
         });
     }).then(function() {
         var offer = pc.localDescription;
-        return fetch('/offer', {
-            body: JSON.stringify({
-                sdp: offer.sdp,
-                type: offer.type,
-            }),
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            method: 'POST'
-        });
+        var ret = null;
+        if (document.getElementById('filter') != null && document.getElementById('filter').checked) {
+            ret = fetch('/offerFilter', {
+                body: JSON.stringify({
+                    sdp: offer.sdp,
+                    type: offer.type,
+                    idNum: id,
+                    }),
+                headers: {
+                    'Content-Type': 'application/json'
+                    },
+                method: 'POST'
+                });
+        }else{
+            ret = fetch('/offer', {
+                body: JSON.stringify({
+                    sdp: offer.sdp,
+                    type: offer.type,
+                    idNum: id,
+                    }),
+                headers: {
+                    'Content-Type': 'application/json'
+                    },
+                method: 'POST'
+                });
+          }
+
+        return ret;
     }).then(function(response) {
         return response.json();
     }).then(function(answer) {
         return pc.setRemoteDescription(answer);
     }).catch(function(e) {
-        alert(e);
+        console.log(e);
+        if(e instanceof SyntaxError){
+        	window.location.href = 'http://sy-eng.f5.si:8090/lightBusy.html';        	
+        }else{
+        	alert(e);
+          }
     });
 }
 
@@ -95,7 +115,9 @@ function start() {
     });
 
     document.getElementById('start').style.display = 'none';
+    console.log("start negotiate");
     negotiate();
+    console.log("end negotiate");
     document.getElementById('stop').style.display = 'inline-block';
 }
 
@@ -106,6 +128,7 @@ function stop() {
     setTimeout(function() {
         pc.close();
     }, 500);
-    document.getElementById('start').style.display = 'inline-block';
+   //document.getElementById('start').style.display = 'inline-block';
+   window.location.href = 'http://sy-eng.f5.si:8090';
 
 }
